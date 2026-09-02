@@ -1,0 +1,204 @@
+name: Sync Vaultwarden stable to ACR
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Stable Vaultwarden version, for example 1.37.2. Leave empty to use the latest stable release."
+        required: false
+        type: string
+
+  schedule:
+    # 每天北京时间 11:23 检查一次。
+    - cron: "23 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-vaultwarden-stable-to-acr
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    env:
+      ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+      ACR_IMAGE: ${{ vars.ACR_IMAGE }}
+      ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+      ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+
+    steps:
+      - name: Validate configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -n "$ACR_REGISTRY" || {
+            echo "Missing repository variable: ACR_REGISTRY"
+            exit 1
+          }
+
+          test -n "$ACR_IMAGE" || {
+            echo "Missing repository variable: ACR_IMAGE"
+            exit 1
+          }
+
+          test -n "$ACR_USERNAME" || {
+            echo "Missing repository secret: ACR_USERNAME"
+            exit 1
+          }
+
+          test -n "$ACR_PASSWORD" || {
+            echo "Missing repository secret: ACR_PASSWORD"
+            exit 1
+          }
+
+      - name: Resolve stable version
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          GITHUB_API_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${REQUESTED_VERSION:-}" ]; then
+            version="$REQUESTED_VERSION"
+          else
+            version="$(
+              curl --fail --silent --show-error --location \
+                --header "Authorization: Bearer ${GITHUB_API_TOKEN}" \
+                --header "Accept: application/vnd.github+json" \
+                https://api.github.com/repos/dani-garcia/vaultwarden/releases/latest |
+              jq --exit-status --raw-output '.tag_name'
+            )"
+          fi
+
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Refusing non-stable version: $version"
+            exit 1
+          fi
+
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+          echo "Selected stable version: $version"
+
+      - name: Log in to ACR
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          printf '%s' "$ACR_PASSWORD" |
+            docker login "$ACR_REGISTRY" \
+              --username "$ACR_USERNAME" \
+              --password-stdin
+
+      - name: Check whether version already exists
+        id: existing
+        shell: bash
+        env:
+          VW_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+
+          target_image="${ACR_REGISTRY}/${ACR_IMAGE}:${VW_VERSION}"
+
+          if docker manifest inspect "$target_image" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "ACR image already exists; it will not be overwritten:"
+            echo "$target_image"
+
+            docker buildx imagetools inspect "$target_image"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Copy official amd64 Debian image to ACR
+        if: steps.existing.outputs.exists != 'true'
+        shell: bash
+        env:
+          VW_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+
+          source_image="ghcr.io/dani-garcia/vaultwarden:${VW_VERSION}"
+          target_image="${ACR_REGISTRY}/${ACR_IMAGE}:${VW_VERSION}"
+
+          docker pull --platform linux/amd64 "$source_image"
+
+          actual_version="$(
+            docker image inspect "$source_image" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.version" }}'
+          )"
+
+          actual_platform="$(
+            docker image inspect "$source_image" \
+              --format '{{.Os}}/{{.Architecture}}'
+          )"
+
+          base_id="$(
+            docker run --rm \
+              --entrypoint /bin/sh \
+              "$source_image" \
+              -c '. /etc/os-release; printf %s "$ID"'
+          )"
+
+          full_version="$(
+            docker run --rm \
+              --entrypoint /vaultwarden \
+              "$source_image" \
+              --version |
+            tail -n 1
+          )"
+
+          test "$actual_version" = "$VW_VERSION" || {
+            echo "Version label mismatch: expected=$VW_VERSION actual=$actual_version"
+            exit 1
+          }
+
+          test "$actual_platform" = "linux/amd64" || {
+            echo "Platform mismatch: $actual_platform"
+            exit 1
+          }
+
+          test "$base_id" = "debian" || {
+            echo "Base image mismatch: expected=debian actual=$base_id"
+            exit 1
+          }
+
+          docker tag "$source_image" "$target_image"
+          docker push "$target_image"
+
+          docker buildx imagetools inspect "$target_image" |
+            tee acr-image-inspect.txt
+
+          target_digest="$(
+            awk '$1 == "Digest:" { print $2; exit }' \
+              acr-image-inspect.txt
+          )"
+
+          test -n "$target_digest" || {
+            echo "Unable to determine ACR digest"
+            exit 1
+          }
+
+          {
+            echo "## Vaultwarden Candidate synchronized"
+            echo
+            echo "- Version: \`$VW_VERSION\`"
+            echo "- Platform: \`$actual_platform\`"
+            echo "- Base: \`$base_id\`"
+            echo "- Runtime: \`$full_version\`"
+            echo "- ACR image: \`$target_image\`"
+            echo "- ACR digest: \`$target_digest\`"
+            echo
+            echo "ECS was not contacted or updated."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log out from ACR
+        if: always()
+        shell: bash
+        run: |
+          docker logout "$ACR_REGISTRY" || true
