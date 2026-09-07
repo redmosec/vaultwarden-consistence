@@ -76,6 +76,8 @@ python3 /root/vw-release-lab/vw_release.py status
 
 ## 后续第一版范围
 
+第二阶段人工操作见 [完整备份与恢复演练手册](PHASE2_BACKUP_RESTORE_DRILL.md)。先按手册证明恢复链路，再把这些动作编码进 `vw-release`。
+
 沿用四个公共接口：`status`、`stage`、`deploy RELEASE_ID`、`rollback RELEASE_ID`；当前只有第一个可用。
 
 1. 根据现场事实补齐状态核对。
