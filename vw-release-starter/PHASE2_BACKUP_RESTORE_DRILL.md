@@ -67,8 +67,32 @@ VW_LAB_IMAGE=REPLACE_WITH_FULL_PRODUCTION_REPODIGEST
 
 ~~~bash
 chmod 600 /root/data/docker_data/vaultwarden-release-lab/.env
+install -d -m 700 /root/data/docker_data/vaultwarden-release-lab/tls
+cd /root/data/docker_data/vaultwarden-release-lab/tls
+openssl genpkey -algorithm RSA -out lab-ca.key -pkeyopt rsa_keygen_bits:2048
+openssl req -x509 -new -sha256 -days 30 \
+  -key lab-ca.key -out lab-ca.crt \
+  -subj '/CN=vw-release-lab-local-CA' \
+  -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' \
+  -addext 'keyUsage=critical,keyCertSign,cRLSign'
+openssl genpkey -algorithm RSA -out localhost.key -pkeyopt rsa_keygen_bits:2048
+openssl req -new -key localhost.key -out localhost.csr -subj '/CN=localhost'
+printf '%s\n' \
+  'authorityKeyIdentifier=keyid,issuer' \
+  'basicConstraints=critical,CA:FALSE' \
+  'keyUsage=critical,digitalSignature,keyEncipherment' \
+  'extendedKeyUsage=serverAuth' \
+  'subjectAltName=DNS:localhost,IP:127.0.0.1' > localhost.ext
+openssl x509 -req -in localhost.csr \
+  -CA lab-ca.crt -CAkey lab-ca.key -CAcreateserial \
+  -out localhost.crt -days 7 -sha256 -extfile localhost.ext
+openssl verify -CAfile lab-ca.crt localhost.crt
+chmod 600 lab-ca.key localhost.key
+cd /root/data/docker_data/vaultwarden-release-lab
 nano /root/data/docker_data/vaultwarden-release-lab/docker-compose.lab.yml
 ~~~
+
+这是只给本次隔离演练使用的短期 RSA 测试证书。验证必须输出 `localhost.crt: OK`。两个私钥必须留在 ECS，不要下载或提交到 Git。
 
 Compose 内容：
 
@@ -79,10 +103,13 @@ services:
     container_name: vaultwarden-release-lab
     restart: "no"
     environment:
-      DOMAIN: "http://localhost:9011"
+      DOMAIN: "https://localhost:9011"
+      ROCKET_TLS: '{certs="/ssl/localhost.crt",key="/ssl/localhost.key"}'
       SIGNUPS_ALLOWED: "true"
     volumes:
       - ./data:/data
+      - ./tls/localhost.crt:/ssl/localhost.crt:ro
+      - ./tls/localhost.key:/ssl/localhost.key:ro
     ports:
       - "127.0.0.1:9011:80"
 ~~~
@@ -95,14 +122,14 @@ docker compose --project-name vw-restore-lab -f docker-compose.lab.yml config --
 docker compose --project-name vw-restore-lab -f docker-compose.lab.yml config
 ~~~
 
-必须看到固定 digest、练习 data、容器名 vaultwarden-release-lab 和 127.0.0.1:9011。若出现生产目录、生产容器名或 0.0.0.0，停止。
+必须看到固定 digest、练习 data、两个只读 tls 文件挂载、容器名 vaultwarden-release-lab 和 127.0.0.1:9011。若出现生产目录、生产容器名或 0.0.0.0，停止。
 
 启动：
 
 ~~~bash
 docker compose --project-name vw-restore-lab -f docker-compose.lab.yml up -d
 docker inspect vaultwarden-release-lab --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}'
-curl --fail --silent --show-error http://127.0.0.1:9011/alive
+curl --fail --silent --show-error --cacert tls/lab-ca.crt https://localhost:9011/alive
 docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
 ~~~
 
@@ -110,7 +137,9 @@ docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
 
 ## 3. 创建虚构数据
 
-在 SSH 客户端建立本地端口转发：本机 9011 → ECS 的 127.0.0.1:9011。浏览器打开 http://localhost:9011。这个端口只绑定 ECS loopback，不要在安全组中开放 9011。
+在 SSH 客户端建立本地端口转发：本机 9011 → ECS 的 127.0.0.1:9011。只把 tls/lab-ca.crt 下载到 Windows，两个私钥必须留在 ECS。在 Windows 当前用户的“受信任的根证书颁发机构”中导入 lab-ca.crt，完全退出并重开 Chrome 或 Edge，再打开 https://localhost:9011。这个端口只绑定 ECS loopback，不要在安全组中开放 9011。
+
+Vaultwarden 1.37.2 的 Web Vault 拒绝 HTTP，包括 localhost；看到 `Insecure URL not allowed` 表示浏览器仍在使用 http://，或者测试CA 证书尚未受信任。不要使用浏览器的“继续访问不安全页面”绕过证书错误。
 
 只创建练习账号：
 
@@ -127,7 +156,7 @@ docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
 cd /root/data/docker_data/vaultwarden-release-lab
 nano docker-compose.lab.yml
 docker compose --project-name vw-restore-lab -f docker-compose.lab.yml up -d
-curl --fail --silent --show-error http://127.0.0.1:9011/alive
+curl --fail --silent --show-error --cacert tls/lab-ca.crt https://localhost:9011/alive
 ~~~
 
 ## 4. 创建完整恢复包
@@ -180,7 +209,7 @@ test -f "$FINAL/COMPLETE"
 ~~~bash
 cd /root/data/docker_data/vaultwarden-release-lab
 docker compose --project-name vw-restore-lab -f docker-compose.lab.yml up -d
-curl --fail --silent --show-error http://127.0.0.1:9011/alive
+curl --fail --silent --show-error --cacert tls/lab-ca.crt https://localhost:9011/alive
 ~~~
 
 登录练习账号，把备注改成 after-backup，同步并刷新确认。再次停止：
@@ -245,7 +274,7 @@ cat "$BACKUP_ROOT/$DRILL_ID/image.txt"
 
 ~~~bash
 docker compose --project-name vw-restore-lab -f docker-compose.lab.yml up -d
-curl --fail --silent --show-error http://127.0.0.1:9011/alive
+curl --fail --silent --show-error --cacert tls/lab-ca.crt https://localhost:9011/alive
 docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
 ~~~
 
@@ -293,7 +322,7 @@ docker inspect vaultwarden-release-lab --format '{{.State.Running}}'
 docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
 ~~~
 
-期望为 false，以及生产 running healthy。清理是后续单独动作。
+期望为 false，以及生产 running healthy。清理是后续单独动作。演练资料不再需要后，从 Windows 当前用户的“受信任的根证书颁发机构”中删除主题为 `CN=vw-release-lab-local-CA` 的测试 CA 证书。
 
 ## 9. 单独清理旧 Candidate 生产副本（用户已授权）
 
@@ -349,5 +378,9 @@ docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
 Vaultwarden 官方说明：SQLite 在线时优先使用 Online Backup API 或内置 backup；服务停止后可以复制主数据库及匹配的 WAL。附件、配置和 RSA 密钥位于数据库之外，也要按实际用途备份。恢复时必须停止服务，数据库单文件备份不能搭配旧 WAL，并应定期实际演练恢复：
 
 https://github.com/dani-garcia/vaultwarden/wiki/Backing-up-your-vault
+
+Vaultwarden 官方 HTTPS 说明：Web Vault 依赖 HTTPS；内置 Rocket TLS 不建议用于生产，但可用于本机端口转发下的隔离演练。Rocket TLS 需要 RSA 证书和容器内可见的证书路径：
+
+https://github.com/dani-garcia/vaultwarden/wiki/Enabling-HTTPS
 
 本演练选择“停止练习容器后完整复制整个 data”，先用最少机制证明恢复链路。通过后再把已验证动作编码进 vw-release。
