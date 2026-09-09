@@ -2,7 +2,7 @@
 
 本阶段只操作新建的练习环境，不停止、不重建、不修改生产容器。
 
-这是人工演练手册，不是自动化脚本。每次只执行一个代码块，核对紧随其后的通过条件后再继续。所有 `REPLACE_WITH_...` 内容必须替换成实际值，不能原样执行。命令默认由 ECS 的 root 管理会话运行。
+这是人工演练手册，不是自动化脚本。每次只执行一个代码块，核对紧随其后的通过条件后再继续。镜像配置中的 `REPLACE_WITH_FULL_PRODUCTION_REPODIGEST` 必须替换为实际 digest。第 6、7 节会提示输入第 4 节记录的 DRILL_ID，无需编辑检查表达式。Bash 代码块必须连同外层圆括号整块执行：开头的 set +e 先取消交互 Shell 可能遗留的 errexit，内部再启用严格检查；失败只退出子 Shell，不关闭 SSH 会话；失败后停止，不继续下一块。变量下划线前不要添加反斜杠。命令默认由 ECS 的 root 管理会话运行。
 
 ## 通过标准与禁区
 
@@ -28,12 +28,16 @@
 ## 1. 开始前只读检查
 
 ~~~bash
+set +e
+(
+set -Eeuo pipefail
 pwd
 docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
 docker inspect vaultwarden --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}'
 docker container ls --all --format '{{.Names}}'
 ss -H -ltn 'sport = :9011'
 df -h /root/data
+)
 ~~~
 
 必须确认：生产为 running healthy；生产 /data 来源正确；容器列表中没有 vaultwarden-release-lab；9011 查询没有输出；/root/data 有足够空间。任一不符就停止。不要把 Docker 读取失败解释成“容器不存在”。
@@ -41,12 +45,15 @@ df -h /root/data
 ## 2. 创建练习环境
 
 ~~~bash
-umask 077
+set +e
+(
 set -Eeuo pipefail
+umask 077
 install -d -m 700 /root/data/docker_data/vaultwarden-release-lab/data
 install -d -m 700 /root/data/backups/vaultwarden-lab
 cd /root/data/docker_data/vaultwarden-release-lab
 pwd
+)
 ~~~
 
 pwd 必须显示 /root/data/docker_data/vaultwarden-release-lab。
@@ -54,7 +61,11 @@ pwd 必须显示 /root/data/docker_data/vaultwarden-release-lab。
 创建 .env：
 
 ~~~bash
+set +e
+(
+set -Eeuo pipefail
 nano /root/data/docker_data/vaultwarden-release-lab/.env
+)
 ~~~
 
 写入：
@@ -66,6 +77,9 @@ VW_LAB_IMAGE=REPLACE_WITH_FULL_PRODUCTION_REPODIGEST
 替换占位符，使用已经核对的 RepoDigest，不得使用 latest。然后：
 
 ~~~bash
+set +e
+(
+set -Eeuo pipefail
 chmod 600 /root/data/docker_data/vaultwarden-release-lab/.env
 install -d -m 700 /root/data/docker_data/vaultwarden-release-lab/tls
 cd /root/data/docker_data/vaultwarden-release-lab/tls
@@ -90,6 +104,7 @@ openssl verify -CAfile lab-ca.crt localhost.crt
 chmod 600 lab-ca.key localhost.key
 cd /root/data/docker_data/vaultwarden-release-lab
 nano /root/data/docker_data/vaultwarden-release-lab/docker-compose.lab.yml
+)
 ~~~
 
 这是只给本次隔离演练使用的短期 RSA 测试证书。验证必须输出 `localhost.crt: OK`。两个私钥必须留在 ECS，不要下载或提交到 Git。
@@ -117,9 +132,13 @@ services:
 检查：
 
 ~~~bash
+set +e
+(
+set -Eeuo pipefail
 cd /root/data/docker_data/vaultwarden-release-lab
 docker compose --project-name vw-restore-lab -f docker-compose.lab.yml config --images
 docker compose --project-name vw-restore-lab -f docker-compose.lab.yml config
+)
 ~~~
 
 必须看到固定 digest、练习 data、两个只读 tls 文件挂载、容器名 vaultwarden-release-lab 和 127.0.0.1:9011。若出现生产目录、生产容器名或 0.0.0.0，停止。
@@ -127,36 +146,45 @@ docker compose --project-name vw-restore-lab -f docker-compose.lab.yml config
 启动：
 
 ~~~bash
+set +e
+(
+set -Eeuo pipefail
+cd /root/data/docker_data/vaultwarden-release-lab
 docker compose --project-name vw-restore-lab -f docker-compose.lab.yml up -d
 docker inspect vaultwarden-release-lab --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}'
 curl --fail --silent --show-error --cacert tls/lab-ca.crt https://localhost:9011/alive
 docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
+)
 ~~~
 
-练习容器应运行，alive 成功，生产仍为 running healthy。
+练习容器应运行，alive 成功，生产仍为 running healthy。刚启动可能尚未就绪；如果 curl 报连接失败或 TLS EOF，先等数秒，再单独重试 HTTPS 探测，不反复重建容器。
 
 ## 3. 创建虚构数据
 
 在 SSH 客户端建立本地端口转发：本机 9011 → ECS 的 127.0.0.1:9011。只把 tls/lab-ca.crt 下载到 Windows，两个私钥必须留在 ECS。在 Windows 当前用户的“受信任的根证书颁发机构”中导入 lab-ca.crt，完全退出并重开 Chrome 或 Edge，再打开 https://localhost:9011。这个端口只绑定 ECS loopback，不要在安全组中开放 9011。
 
-Vaultwarden 1.37.2 的 Web Vault 拒绝 HTTP，包括 localhost；看到 `Insecure URL not allowed` 表示浏览器仍在使用 http://，或者测试CA 证书尚未受信任。不要使用浏览器的“继续访问不安全页面”绕过证书错误。
+本次现场镜像为 Vaultwarden 1.35.1；版本以实际镜像为准。访问地址必须是 https://localhost:9011。`Insecure URL not allowed` 与浏览器证书不受信任是不同问题：前者检查 URL 协议和 DOMAIN，后者检查测试 CA 信任与证书有效期。不要使用浏览器的“继续访问不安全页面”绕过证书错误。
 
 只创建练习账号：
 
 - 邮箱 restore-lab@example.invalid
-- 使用新的练习主密码
+- 使用新的练习主密码，不把密码写入本手册、聊天或 Git
 - 创建条目 vw-release-restore-drill
 - 备注写 before-backup
 - 为练习账号启用新的测试 TOTP；seed 和验证码只留在你的测试设备，不写入文档
 - 若日常使用附件，再加入一个无隐私小文本附件
 
-同步、退出并使用测试 TOTP 重新登录，确认 before-backup 存在。随后编辑 Compose，把 SIGNUPS_ALLOWED 改为 false，并只重建练习容器：
+这里的 TOTP 是练习账号本身的两步登录，不是具体条目中的“验证器密钥（TOTP）”。在 Web Vault 的“设置 → 安全 → 两步登录 → 验证器应用”启用，用独立验证器保存测试密钥，并在密码库外保存恢复码。同步后选择“退出登录”（不是锁定），用主密码登录后输入六位验证码，不勾选“记住我”；必要时用无痕窗口排除已记住设备。确认 before-backup 存在，并记下此次验证时间。条目里的 TOTP 显示“未设置”不代表账号两步登录未启用。随后编辑 Compose，把 SIGNUPS_ALLOWED 改为 false，并只重建练习容器：
 
 ~~~bash
+set +e
+(
+set -Eeuo pipefail
 cd /root/data/docker_data/vaultwarden-release-lab
 nano docker-compose.lab.yml
 docker compose --project-name vw-restore-lab -f docker-compose.lab.yml up -d
 curl --fail --silent --show-error --cacert tls/lab-ca.crt https://localhost:9011/alive
+)
 ~~~
 
 ## 4. 创建完整恢复包
@@ -164,21 +192,29 @@ curl --fail --silent --show-error --cacert tls/lab-ca.crt https://localhost:9011
 停止且只停止练习容器：
 
 ~~~bash
+set +e
+(
+set -Eeuo pipefail
 cd /root/data/docker_data/vaultwarden-release-lab
 docker compose --project-name vw-restore-lab -f docker-compose.lab.yml stop
 docker inspect vaultwarden-release-lab --format '{{.State.Running}}'
 docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
+)
 ~~~
 
 期望为 false，以及生产 running healthy。
 
-在同一个 SSH 会话中整块执行：
+整块执行（子 Shell 中的变量不会保留到下一块；请记下输出的 DRILL_ID）：
 
 ~~~bash
-umask 077
+set +e
+(
 set -Eeuo pipefail
+umask 077
 LAB_ROOT=/root/data/docker_data/vaultwarden-release-lab
 BACKUP_ROOT=/root/data/backups/vaultwarden-lab
+test "$(docker inspect vaultwarden-release-lab --format '{{.State.Running}}')" = false
+test "$(docker inspect vaultwarden-release-lab --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}')" = "$LAB_ROOT/data"
 DRILL_ID="lab-$(date -u +%Y%m%dT%H%M%SZ)"
 PARTIAL="$BACKUP_ROOT/$DRILL_ID.partial"
 FINAL="$BACKUP_ROOT/$DRILL_ID"
@@ -193,44 +229,58 @@ docker compose --project-name vw-restore-lab -f "$LAB_ROOT/docker-compose.lab.ym
 cd "$PARTIAL"
 find data compose image.txt -type f -print0 | sort -z | xargs -0 sha256sum > manifest.sha256
 sha256sum -c manifest.sha256
-python3 -c 'import sqlite3,sys; print(sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True).execute("PRAGMA quick_check").fetchone()[0])' "$PARTIAL/data/db.sqlite3"
+python3 -c 'import sqlite3,sys; c=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True); r=c.execute("PRAGMA quick_check").fetchall(); c.close(); print(r); sys.exit(0 if r==[("ok",)] else 1)' "$PARTIAL/data/db.sqlite3"
 
 touch COMPLETE
 sync
 mv "$PARTIAL" "$FINAL"
 printf 'DRILL_ID=%s\n' "$DRILL_ID"
 test -f "$FINAL/COMPLETE"
+)
 ~~~
 
-通过条件：manifest 全部 OK，SQLite 输出 ok，并记下 DRILL_ID。任一步失败都不要手工补建 COMPLETE，也不要把 .partial 改名。
+通过条件：manifest 全部 OK，SQLite 输出 [('ok',)]，退出码为 0，并记下 DRILL_ID。任一步失败都不要手工补建 COMPLETE，也不要把 .partial 改名。
 
 ## 5. 制造备份后的变化
 
 ~~~bash
+set +e
+(
+set -Eeuo pipefail
 cd /root/data/docker_data/vaultwarden-release-lab
 docker compose --project-name vw-restore-lab -f docker-compose.lab.yml up -d
 curl --fail --silent --show-error --cacert tls/lab-ca.crt https://localhost:9011/alive
+)
 ~~~
 
 登录练习账号，把备注改成 after-backup，同步并刷新确认。再次停止：
 
 ~~~bash
+set +e
+(
+set -Eeuo pipefail
+cd /root/data/docker_data/vaultwarden-release-lab
 docker compose --project-name vw-restore-lab -f docker-compose.lab.yml stop
 docker inspect vaultwarden-release-lab --format '{{.State.Running}}'
 docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
+)
 ~~~
 
 ## 6. 保留现场并恢复到新目录
 
-把 DRILL_ID 换成第 4 步实际值，不得猜“最新目录”：
+在提示处输入第 4 步实际值，不得猜“最新目录”。本次已有备份 ID 是 `lab-20260908T144414Z`，仅用于本次演练。恢复不能重复执行；目标现场目录已存在时先核查进度，不能删除它们绕过检查：
 
 ~~~bash
-umask 077
+set +e
+(
 set -Eeuo pipefail
+umask 077
 LAB_ROOT=/root/data/docker_data/vaultwarden-release-lab
 BACKUP_ROOT=/root/data/backups/vaultwarden-lab
-DRILL_ID='REPLACE_WITH_EXACT_DRILL_ID'
-test "$DRILL_ID" != REPLACE_WITH_EXACT_DRILL_ID
+read -r -p '输入第 4 步记录的 DRILL_ID: ' DRILL_ID
+[[ "$DRILL_ID" =~ ^lab-[0-9]{8}T[0-9]{6}Z$ ]] || { echo '错误：DRILL_ID 格式不正确'; exit 1; }
+test "$(docker inspect vaultwarden-release-lab --format '{{.State.Running}}')" = false
+test "$(docker inspect vaultwarden-release-lab --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}')" = "$LAB_ROOT/data"
 BUNDLE="$BACKUP_ROOT/$DRILL_ID"
 FAILED_DATA="$LAB_ROOT/failed-data-$DRILL_ID"
 RESTORED_DATA="$LAB_ROOT/data.restore-$DRILL_ID"
@@ -243,39 +293,52 @@ test ! -e "$FAILED_COMPOSE"
 
 cd "$BUNDLE"
 sha256sum -c manifest.sha256
-python3 -c 'import sqlite3,sys; print(sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True).execute("PRAGMA quick_check").fetchone()[0])' "$BUNDLE/data/db.sqlite3"
+python3 -c 'import sqlite3,sys; c=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True); r=c.execute("PRAGMA quick_check").fetchall(); c.close(); print(r); sys.exit(0 if r==[("ok",)] else 1)' "$BUNDLE/data/db.sqlite3"
 
 mv "$LAB_ROOT/data" "$FAILED_DATA"
 install -d -m 700 "$RESTORED_DATA"
 cp -a "$BUNDLE/data/." "$RESTORED_DATA/"
 diff -qr "$BUNDLE/data" "$RESTORED_DATA"
-python3 -c 'import sqlite3,sys; print(sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True).execute("PRAGMA quick_check").fetchone()[0])' "$RESTORED_DATA/db.sqlite3"
+python3 -c 'import sqlite3,sys; c=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True); r=c.execute("PRAGMA quick_check").fetchall(); c.close(); print(r); sys.exit(0 if r==[("ok",)] else 1)' "$RESTORED_DATA/db.sqlite3"
 
 install -d -m 700 "$FAILED_COMPOSE"
 mv "$LAB_ROOT/docker-compose.lab.yml" "$LAB_ROOT/.env" "$FAILED_COMPOSE/"
 cp -a "$BUNDLE/compose/." "$LAB_ROOT/"
 mv "$RESTORED_DATA" "$LAB_ROOT/data"
+)
 ~~~
 
-COMPLETE 缺失、manifest 失败、SQLite 不是 ok、diff 有输出或目标目录已存在时，必须停止。
+COMPLETE 缺失、manifest 失败、SQLite 检查失败、diff 有输出或目标目录已存在时，必须停止。
 
 核对恢复镜像：
 
 ~~~bash
+set +e
+(
+set -Eeuo pipefail
 cd /root/data/docker_data/vaultwarden-release-lab
 BACKUP_ROOT=/root/data/backups/vaultwarden-lab
-DRILL_ID='REPLACE_WITH_EXACT_DRILL_ID'
-test "$DRILL_ID" != REPLACE_WITH_EXACT_DRILL_ID
-docker compose --project-name vw-restore-lab -f docker-compose.lab.yml config --images
-cat "$BACKUP_ROOT/$DRILL_ID/image.txt"
+read -r -p '输入第 4 步记录的 DRILL_ID: ' DRILL_ID
+[[ "$DRILL_ID" =~ ^lab-[0-9]{8}T[0-9]{6}Z$ ]] || { echo '错误：DRILL_ID 格式不正确'; exit 1; }
+test -f "$BACKUP_ROOT/$DRILL_ID/COMPLETE"
+EXPECTED_IMAGE=$(cat "$BACKUP_ROOT/$DRILL_ID/image.txt")
+ACTUAL_IMAGE=$(docker compose --project-name vw-restore-lab -f docker-compose.lab.yml config --images)
+printf 'Compose: %s\nBackup:  %s\n' "$ACTUAL_IMAGE" "$EXPECTED_IMAGE"
+test "$ACTUAL_IMAGE" = "$EXPECTED_IMAGE"
+)
 ~~~
 
 两者必须一致。随后：
 
 ~~~bash
+set +e
+(
+set -Eeuo pipefail
+cd /root/data/docker_data/vaultwarden-release-lab
 docker compose --project-name vw-restore-lab -f docker-compose.lab.yml up -d
 curl --fail --silent --show-error --cacert tls/lab-ca.crt https://localhost:9011/alive
 docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
+)
 ~~~
 
 通过 Web Vault 确认：
@@ -285,41 +348,65 @@ docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
 - 备份前的附件可下载。
 - 新建 after-restore 条目并同步成功。
 
-此时才记录“隔离环境完整恢复通过”。
+以上项目全部通过后才记录“隔离环境完整恢复通过”。TOTP 验收必须针对账号两步登录，不能用条目的 TOTP 字段代替；若账号设置确实显示未启用，先停止验收并比对好备份、failed-data 与当前库的两步验证启用标志，不能重新启用来掩盖问题。附件未使用时记为不适用。
 
 ## 7. 验证损坏包会被拒绝
 
 不要损坏好包：
 
 ~~~bash
+set +e
+(
+set -Eeuo pipefail
+umask 077
 BACKUP_ROOT=/root/data/backups/vaultwarden-lab
-DRILL_ID='REPLACE_WITH_EXACT_DRILL_ID'
-test "$DRILL_ID" != REPLACE_WITH_EXACT_DRILL_ID
+read -r -p '输入第 4 步记录的 DRILL_ID: ' DRILL_ID
+[[ "$DRILL_ID" =~ ^lab-[0-9]{8}T[0-9]{6}Z$ ]] || { echo '错误：DRILL_ID 格式不正确'; exit 1; }
+GOOD="$BACKUP_ROOT/$DRILL_ID"
 BAD="$BACKUP_ROOT/$DRILL_ID-corrupt"
+test -f "$GOOD/COMPLETE"
+test -f "$GOOD/data/db.sqlite3"
+cd "$GOOD"
+sha256sum -c manifest.sha256
 
 test ! -e "$BAD"
-cp -a "$BACKUP_ROOT/$DRILL_ID" "$BAD"
-printf '\ncorrupt-test\n' >> "$BAD/data/db.sqlite3"
-
+cp -a -- "$GOOD" "$BAD"
 cd "$BAD"
-if sha256sum -c manifest.sha256; then
-  echo 'FAIL: 损坏未被发现'
-else
-  echo 'PASS: manifest 已拒绝损坏恢复包'
-fi
+sha256sum -c manifest.sha256
+printf '\ncorrupt-test\n' >> data/db.sqlite3
+
+python3 - <<'PY_CHECK'
+import os
+import subprocess
+from pathlib import Path
+names = [line.split('  ', 1)[1] for line in Path('manifest.sha256').read_text().splitlines()]
+assert 'data/db.sqlite3' in names, 'manifest 缺少数据库'
+r = subprocess.run(['sha256sum', '-c', 'manifest.sha256'], env={**os.environ, 'LC_ALL': 'C'}, capture_output=True, text=True)
+print(r.stdout, end='')
+print(r.stderr, end='')
+expected = [name + (': FAILED' if name == 'data/db.sqlite3' else ': OK') for name in names]
+if r.returncode != 1 or r.stdout.splitlines() != expected:
+    raise SystemExit('FAIL: 未获得唯一的数据库哈希不匹配结果；检查文件缺失或其他错误')
+print('PASS: 完整副本中的 data/db.sqlite3 损坏已被 manifest 检出')
+PY_CHECK
+)
 ~~~
 
-期望至少一个 FAILED，最后显示 PASS。不得启动坏包。过期 release ID 和恢复中断要等执行器具有事务状态后再测。
+期望只有 data/db.sqlite3 显示 FAILED，其余文件均 OK，最后显示 PASS。文件不存在、复制失败、cd 失败均不算损坏检测通过；坏包已存在时停止，不覆盖，也不重复追加。不得启动坏包。过期 release ID 和恢复中断要等执行器具有事务状态后再测。
 
 ## 8. 结束状态
 
 首次先保留恢复后的 data、failed-data、failed-compose、好恢复包和坏包，不清理。保持练习容器停止：
 
 ~~~bash
+set +e
+(
+set -Eeuo pipefail
 cd /root/data/docker_data/vaultwarden-release-lab
 docker compose --project-name vw-restore-lab -f docker-compose.lab.yml stop
 docker inspect vaultwarden-release-lab --format '{{.State.Running}}'
 docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
+)
 ~~~
 
 期望为 false，以及生产 running healthy。清理是后续单独动作。演练资料不再需要后，从 Windows 当前用户的“受信任的根证书颁发机构”中删除主题为 `CN=vw-release-lab-local-CA` 的测试 CA 证书。
@@ -331,9 +418,13 @@ docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
 先在 NPM 管理界面确认 vw2candidate.qg778.com 的入口仍为 Disabled。然后只读核对：
 
 ~~~bash
+set +e
+(
+set -Eeuo pipefail
 docker inspect vaultwarden-candidate --format '{{.State.Running}}'
 docker inspect vaultwarden-candidate --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}'
 docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
+)
 ~~~
 
 必须依次看到 false、精确路径 /root/data/docker_data/vaultwarden/candidate-data-1.37.2-20260902_160514，以及生产 running healthy。任何结果不同都停止。
@@ -341,8 +432,10 @@ docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
 删除已停止的旧 Candidate 容器，再把敏感数据目录改名隔离：
 
 ~~~bash
-umask 077
+set +e
+(
 set -Eeuo pipefail
+umask 077
 CANDIDATE=/root/data/docker_data/vaultwarden/candidate-data-1.37.2-20260902_160514
 RETIRED=/root/data/docker_data/vaultwarden/candidate-retired-1.37.2-20260902_160514
 
@@ -354,6 +447,7 @@ docker rm vaultwarden-candidate
 mv -- "$CANDIDATE" "$RETIRED"
 docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
 du -sh -- "$RETIRED"
+)
 ~~~
 
 生产仍必须为 running healthy。此时目录还能通过反向 mv 恢复；先不要继续，重新运行 vw_release.py status，确认 production 正常且 candidate.exists 为 false。
@@ -361,6 +455,8 @@ du -sh -- "$RETIRED"
 确认无误后，才永久删除这个精确隔离目录：
 
 ~~~bash
+set +e
+(
 set -Eeuo pipefail
 RETIRED=/root/data/docker_data/vaultwarden/candidate-retired-1.37.2-20260902_160514
 test "$RETIRED" = /root/data/docker_data/vaultwarden/candidate-retired-1.37.2-20260902_160514
@@ -369,6 +465,7 @@ test ! -L "$RETIRED"
 rm -rf --one-file-system -- "$RETIRED"
 test ! -e "$RETIRED"
 docker inspect vaultwarden --format '{{.State.Status}} {{.State.Health.Status}}'
+)
 ~~~
 
 最后必须再次看到生产 running healthy。该删除不可恢复；不要使用变量为空、通配符或缩短后的父目录执行 rm。
@@ -384,3 +481,14 @@ Vaultwarden 官方 HTTPS 说明：Web Vault 依赖 HTTPS；内置 Rocket TLS 不
 https://github.com/dani-garcia/vaultwarden/wiki/Enabling-HTTPS
 
 本演练选择“停止练习容器后完整复制整个 data”，先用最少机制证明恢复链路。通过后再把已验证动作编码进 vw-release。
+
+账号两步登录参考：https://bitwarden.com/help/setup-two-step-login-authenticator/
+
+## 手册修改后的本地检查
+
+在本手册所在目录运行：
+
+- Windows CMD / PowerShell：`py check_drill_runbook.py`。脚本自动调用默认 WSL 发行版中的 Python 3、Bash 和 sha256sum；需要已安装并可启动的 WSL。
+- WSL / Linux：`python3 check_drill_runbook.py`（需要 Bash、Python 3、sha256sum）。
+
+手册固定按 UTF-8 读取，不依赖 Windows 默认 GBK 编码。所有检查只在本地临时目录运行，不连接 ECS，也不执行真实备份或恢复。

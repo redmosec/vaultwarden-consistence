@@ -78,6 +78,8 @@ python3 /root/vw-release-lab/vw_release.py status
 
 第二阶段人工操作见 [完整备份与恢复演练手册](PHASE2_BACKUP_RESTORE_DRILL.md)。先按手册证明恢复链路，再把这些动作编码进 `vw-release`。
 
+第二阶段完成后，按 [第三阶段：真实客户端升级与恢复验证](PHASE3_UPGRADE_COMPATIBILITY_DRILL.md) 验证 Edge 扩展与 Android App。阶段、分工及生产发布边界见 [完整流程说明](完整流程说明.md)。手册已提供不代表升级测试或生产发布已经完成。
+
 沿用四个公共接口：`status`、`stage`、`deploy RELEASE_ID`、`rollback RELEASE_ID`；当前只有第一个可用。
 
 1. 根据现场事实补齐状态核对。
