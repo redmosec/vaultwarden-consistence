@@ -241,4 +241,4 @@ docker compose up -d --no-deps --pull never vaultwarden
 
 ## License
 
-[MIT](LICENSE)
+[AGPLV3.0](LICENSE)
