@@ -24,6 +24,10 @@ GitHub Actions 每日检查，也可手动触发
 
 自动化边界很明确：workflow 不连接生产服务器、不自动部署、不监测 Bitwarden 客户端版本，也不把 HTTP 200 当作兼容性通过。
 
+## Agent 在哪里
+
+配置 Agent 负责在交互维护任务中核对版本、准备已授权变更并整理验收证据。当前仓库没有常驻 Agent 或自动部署执行器；本地维护规则和部署台账保留在私有位置。详见 [Agent 定位、公开边界与贡献指南](docs/AGENT.md)。
+
 ## 仓库内容
 
 ```text
@@ -31,6 +35,7 @@ GitHub Actions 每日检查，也可手动触发
 ├── .github/workflows/sync-vaultwarden-stable.yml
 ├── .gitignore
 ├── LICENSE
+├── docs/AGENT.md
 └── README.md
 ```
 
